@@ -1,0 +1,73 @@
+name: jsDelivr CDN Auto Purge
+
+# product-images repo에 push되면 변경된 폴더의 jsDelivr CDN 캐시를 자동 무효화
+# 12시간 캐시 지연 문제 해결 — 사장님 PC 꺼져있어도 GitHub 서버가 자동 처리
+# 시크릿 불필요 (jsDelivr purge API는 인증 없음)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # 수동 실행도 가능
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # diff 계산용
+
+      - name: Detect changed folders
+        id: changed
+        run: |
+          # 이번 push에서 변경된 파일들의 최상위 폴더 추출
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD | awk -F/ '$1 != "" && $1 != ".github" && $1 != "README.md" {print $1}' | sort -u)
+          else
+            # 첫 push인 경우 모든 폴더
+            CHANGED=$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v "^.github$")
+          fi
+          echo "Changed folders:"
+          echo "$CHANGED"
+          # GitHub Actions output에 multiline 저장
+          {
+            echo "folders<<EOF"
+            echo "$CHANGED"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Purge jsDelivr CDN
+        if: steps.changed.outputs.folders != ''
+        run: |
+          set -e
+          SUCCESS=0
+          FAIL=0
+          while IFS= read -r folder; do
+            [ -z "$folder" ] && continue
+            URL="https://purge.jsdelivr.net/gh/choon778-hub/product-images@main/${folder}/"
+            echo ""
+            echo "Purging: $URL"
+            RESP=$(curl -s -w "\n[HTTP %{http_code}]" "$URL")
+            echo "$RESP"
+            if echo "$RESP" | grep -q '"status".*"finished"' || echo "$RESP" | grep -q '\[HTTP 200\]'; then
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAIL=$((FAIL + 1))
+            fi
+          done <<< "${{ steps.changed.outputs.folders }}"
+          echo ""
+          echo "==================="
+          echo "Purge 결과: 성공 $SUCCESS / 실패 $FAIL"
+          echo "==================="
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## jsDelivr CDN Purge 결과" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "변경된 폴더:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.changed.outputs.folders }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
